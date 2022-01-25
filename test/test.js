@@ -6,12 +6,12 @@
 // Cleanups welcome, so long as you don't remove any tests.
 
 const assert = require('assert')
-const { type } = require('../dist/json1')
+const { type, editOp } = require('../dist/json1')
 const log = require('../dist/log').default
 const genOp = require('./genOp')
 const deepClone = require('../dist/deepClone').default
 
-const { transform } = type
+const { transform, transformNoConflict } = type
 const { DROP_COLLISION, RM_UNEXPECTED_CONTENT, BLACKHOLE } = type
 
 const apply = ({ doc: snapshot, op, expect }) => {
@@ -225,10 +225,129 @@ const path = (path, { op, expect }) => {
 
 describe('json1', () => {
   before(() => {
+	type.registerSubtype({
+		name: 'MyCounter',
+		apply: (doc, op) => doc + op.inc,
+		compose: (op1, op2) => ({ inc: op1.inc + op2.inc })	,
+		transform: (op1, op2) => op1
+	})
     type.registerSubtype(require('ot-simple'))
     // type.setDebug(true)
   })
   after(() => type.setDebug(false))
+
+  describe.only('MyTests', () => {
+	it('Swap parents', () => {
+		const op1 = ['foo', { p: 2, d: 1 }, 'bar', { p: 1, d: 2 }, 'baz', { p: 0, d: 0 }];
+		const doc = {
+			id: 'A',
+			foo: {
+				id: 'B',
+				bar: {
+					id: 'C',
+					baz: {
+						id: 'D'
+					}
+				}
+			}
+		};
+		const expect = {
+			id: 'A',
+			foo: {
+				id: 'C',
+				bar: {
+					id: 'B',
+					baz: {
+						id: 'D'
+					}
+				}
+			}
+		};
+		apply({doc, op: op1, expect });
+	});
+
+	it('Counter', () => {
+		const op1 = editOp(['n'], 'MyCounter', { inc: 1 })
+		const op2 = editOp(['n'], 'MyCounter', { inc: 3 })
+    	const transL = transform(op2, op1, 'left');
+    	const transR = transform(op2, op1, 'right');
+		assert.deepStrictEqual(transL, op2);
+		assert.deepStrictEqual(transR, op2);
+		const comp = editOp(['n'], 'MyCounter', { inc: 4 })
+    	compose({ op2, op1, expect: comp});
+    	compose({ op1, op2, expect: comp});
+
+		apply({doc: { n: 0 }, op: op1, expect: { n: 1 }});
+		apply({doc: { n: 0 }, op: op2, expect: { n: 3 }});
+		apply({doc: { n: 0 }, op: comp, expect: { n: 4 }});
+	});
+
+	it('Map clear', () => {
+		const fst = ['map', 'key', { i: '!'}];
+		const snd = ['map', { r: true}];
+    	const actualL = transform(snd, fst, 'left');
+    	const actualR = transform(snd, fst, 'right');
+	});
+
+	it('Concurrent insert at same index', () => {
+		const fst = [1, { i: '!'}];
+		const snd = [1, { i: '1'}];
+		const expectedL = [1, { i: '1'}];
+		const expectedR = [2, { i: '1'}];
+    	const actualL = transform(snd, fst, 'left');
+    	const actualR = transform(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, expectedL);
+		assert.deepStrictEqual(actualR, expectedR);
+	});
+
+  	it('Delete over concurrent insert', () => {
+		const i = [1, { i: '!'}];
+    	const fst = type.compose(i, i);
+		const snd = [{ r: 2 }];
+    	const actualL = transformNoConflict(snd, fst, 'left');
+    	const actualR = transformNoConflict(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, [{ r: 2 }, 1, { r: 2 }]); // Removes both the original content and the inserted content
+		assert.deepStrictEqual(actualR, [{ r: 2 }, 1, { r: 2 }]);
+		transform(snd, fst, 'left');
+		transform(snd, fst, 'right');
+	});
+
+  	it('Insert after replace [index]', () => {
+		const fst = [{ r: 1 }, 0, { i: '1'}];
+		const snd = [{ i: '2'}];
+    	const actualL = transform(snd, fst, 'left');
+    	const actualR = transform(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, snd);
+		assert.deepStrictEqual(actualR, snd);
+	});
+
+  	it('Insert after replace [index, ...]', () => {
+		const fst = [{ r: 2 }, 0, { i: '1'}];
+		const snd = [{ i: '2'}];
+    	const actualL = transform(snd, fst, 'left');
+    	const actualR = transform(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, snd);
+		assert.deepStrictEqual(actualR, snd);
+	});
+
+  	it('Insert after replace [..., index]', () => {
+		const fst = [{ r: 2 }, 0, { i: '1'}];
+		const snd = [1, { i: '2'}];
+    	const actualL = transformNoConflict(snd, fst, 'left');
+    	const actualR = transformNoConflict(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, null);
+		assert.deepStrictEqual(actualR, null);
+	});
+
+  	it('Insert after replace [..., index, ...]', () => {
+		const fst = [{ r: 3 }, 0, { i: '1'}];
+		const snd = [1, { i: '2'}];
+    	const actualL = transformNoConflict(snd, fst, 'left');
+    	const actualR = transformNoConflict(snd, fst, 'right');
+		assert.deepStrictEqual(actualL, null);
+		assert.deepStrictEqual(actualR, null);
+	});
+  });
 
   describe('checkOp', () => {
     const pass = op => {
